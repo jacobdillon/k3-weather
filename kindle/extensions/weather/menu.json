@@ -1,0 +1,13 @@
+{
+  "items": [
+    {
+      "name": "Weather",
+      "priority": 0,
+      "items": [
+        { "name": "Start weather display", "priority": 1, "action": "bin/weather.sh", "params": "start", "exitmenu": true },
+        { "name": "Stop weather display", "priority": 2, "action": "bin/weather.sh", "params": "stop", "exitmenu": true },
+        { "name": "Sleep/wake test (unplug USB first)", "priority": 3, "action": "bin/sleeptest.sh", "exitmenu": true }
+      ]
+    }
+  ]
+}
