@@ -17,7 +17,7 @@ A full-screen weather and transit display for a jailbroken Kindle 3 (Keyboard), 
   - Open-Meteo has no server-side cross-model average; its default `best_match` picks a single model per location.
 - **Refreshes** every 30 minutes, or every 5 minutes while the MBTA view is showing. Each refresh is a full e-ink refresh, which clears ghosting.
 - **Battery:** a battery indicator under the header turns bold with "charge me" at 20% or below. `battery.csv` logs the level at every refresh.
-- **Power saving:** the optional wifi saver switches wifi on only while fetching. The optional sleep mode suspends the Kindle between refreshes.
+- **Power saving:** by default the Kindle is suspended between refreshes and woken by its RTC alarm, and wifi is only on while fetching.
 - **No API keys.** Open-Meteo is fetched over plain HTTP, so the Kindle's outdated TLS stack doesn't matter. MBTA is fetched over HTTPS with Zig's own TLS client.
 - **A single static ARM binary** (musl, soft-float, ARM1136). The Kindle needs nothing beyond a jailbreak and KUAL.
 
@@ -61,7 +61,7 @@ sh /mnt/us/extensions/weather/bin/weather.sh start   # or: stop
 | M | switch the bottom half between the next two days and MBTA departures (only when MBTA rows are configured) |
 | Any other key | refresh now |
 
-In sleep mode, keys only work while the Kindle is awake. Slide the power switch to wake it. The status line then says "Awake: …", and you have a minute to press a key before it sleeps again.
+In sleep mode (the default), keys only work while the Kindle is awake. Slide the power switch to wake it. The status line then says "Awake: …", and you have a minute to press a key before it sleeps again.
 
 While the display runs, the launcher:
 
@@ -82,7 +82,7 @@ Everything lives in `extensions/weather/weather.conf`:
 | `UNITS` | `imperial` | `metric` or `imperial` |
 | `INTERVAL` | `1800` | seconds between refreshes in the forecast view |
 | `WIFI_SAVER` | `1` | switch wifi on only while fetching |
-| `SLEEP` | `0` | suspend the Kindle between refreshes (see [Sleep mode](#sleep-mode)) |
+| `SLEEP` | `1` | suspend the Kindle between refreshes; `0` keeps it awake (see [Sleep mode](#sleep-mode)) |
 | `MBTA1`…`MBTA3` | two Red Line rows | MBTA rows; see [MBTA departures](#mbta-departures) |
 | `MBTA_INTERVAL` | `300` | seconds between refreshes in the MBTA view |
 | `VIEW` | `mbta` | bottom half at start: `mbta` or `days` |
@@ -92,10 +92,12 @@ With `WIFI_SAVER=1`, the app turns wifi on before each fetch with `lipc-set-prop
 
 ## Sleep mode
 
-With `SLEEP=1`, the app suspends the Kindle between refreshes and wakes it with the RTC alarm, the way [kindle-dash](https://github.com/pascalw/kindle-dash) does on the Kindle 4:
+By default (`SLEEP=1`), the app suspends the Kindle between refreshes and wakes it with the RTC alarm, the way [kindle-dash](https://github.com/pascalw/kindle-dash) does on the Kindle 4:
 
 1. It writes the number of seconds until the next refresh to `/sys/devices/platform/mxc_rtc.0/wakeup_enable`, which belongs to Amazon's RTC driver.
 2. It writes `mem` to `/sys/power/state`. That write returns when the RTC alarm, or the power switch, wakes the Kindle.
+
+The next refresh is due one period after the previous one *started*, so the 20–25 s spent waking, reconnecting and fetching doesn't add to every cycle. In testing, the RTC woke the Kindle within 1–2 s of the requested time.
 
 The forecast stays on screen while the Kindle is suspended, because e-ink keeps its image without power. powerd stays out of it: the stock UI remains paused and `preventScreenSaver` remains 1, so the Kindle never shows its own screensaver. After every wake, the log records the kernel's wake source. If the kernel refuses to suspend, the log says why, and the app stays awake for that cycle.
 

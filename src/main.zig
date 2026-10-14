@@ -311,10 +311,12 @@ const App = struct {
     /// Without --sleep: update, then wait for the period or a key.
     fn runAwake(app: *App) void {
         while (true) {
+            const started = sys.nowMs();
             const ok = app.update();
-            // After a failure with nothing to show, retry sooner.
+            // After a failure with nothing to show, retry sooner. The period
+            // counts from the start of the update, as in runAsleep.
             const period_ms = if (!ok and app.weather == null) 60_000 else app.period() * 1000;
-            switch (app.inputs.wait(period_ms)) {
+            switch (app.inputs.wait(period_ms - (sys.nowMs() - started))) {
                 .quit => return,
                 .toggle => app.view = app.view.other(),
                 .refresh, .timeout => {},
@@ -335,10 +337,13 @@ const App = struct {
 
         while (true) {
             if (sys.realtimeSec() >= due - 30) { // close enough: update now rather than sleep again
+                // Count the period from the start of the update, so the time
+                // spent reconnecting and fetching doesn't add to every cycle.
+                const started = sys.realtimeSec();
                 const ok = app.update();
                 if (drain_after_update) app.inputs.drain("pressed while switching views");
                 drain_after_update = false;
-                due = sys.realtimeSec() + if (ok) app.period() else @min(app.period(), 300);
+                due = started + if (ok) app.period() else @min(app.period(), 300);
             }
 
             if (user_awake) {
