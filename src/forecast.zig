@@ -79,7 +79,7 @@ fn modelValues(obj: JsonObj, base: []const u8, i: ?usize, out: *[models.len]f64)
     var n: usize = 0;
     var kb: [96]u8 = undefined;
     for (models) |m| {
-        const key = std.fmt.bufPrint(&kb, "{s}_{s}", .{ base, m }) catch continue;
+        const key = std.mem.print(&kb, "{s}_{s}", .{ base, m }) catch continue;
         if (numAt(obj, key, i)) |v| {
             out[n] = v;
             n += 1;
@@ -122,7 +122,7 @@ fn blendCode(obj: JsonObj, base: []const u8, i: ?usize) ?i32 {
 fn blendStr(obj: JsonObj, base: []const u8, i: usize) ?[]const u8 {
     var kb: [96]u8 = undefined;
     for (models) |m| {
-        const key = std.fmt.bufPrint(&kb, "{s}_{s}", .{ base, m }) catch continue;
+        const key = std.mem.print(&kb, "{s}_{s}", .{ base, m }) catch continue;
         if (strAt(obj, key, i)) |s| return s;
     }
     return strAt(obj, base, i);
@@ -188,7 +188,7 @@ pub fn parse(json: []const u8) !Weather {
 
 pub fn fetch(lat: []const u8, lon: []const u8, units: Units, buf: []u8) !Weather {
     var path_buf: [640]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/v1/forecast?latitude={s}&longitude={s}" ++
+    const path = try std.mem.print(&path_buf, "/v1/forecast?latitude={s}&longitude={s}" ++
         "&current=is_day" ++
         "&minutely_15=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code&forecast_minutely_15=1" ++
         "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,sunrise,sunset" ++

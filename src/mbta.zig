@@ -84,12 +84,12 @@ pub const Board = struct {
         // The predictions endpoint silently ignores an unknown stop filter and
         // returns other stops on the route, so make sure the stop exists first.
         if (!b.stop_ok[i]) {
-            const stop_path = try std.fmt.bufPrint(&path_buf, "/stops/{s}?fields%5Bstop%5D=name", .{line.stop});
+            const stop_path = try std.mem.print(&path_buf, "/stops/{s}?fields%5Bstop%5D=name", .{line.stop});
             _ = net.getTls(host, stop_path, buf) catch |e| return if (e == error.HttpStatus) error.UnknownStop else e;
             b.stop_ok[i] = true;
         }
         // Ask for a few extra in case some have no time (e.g. skipped stops).
-        const path = try std.fmt.bufPrint(&path_buf, "/predictions?filter%5Bstop%5D={s}&filter%5Broute%5D={s}" ++
+        const path = try std.mem.print(&path_buf, "/predictions?filter%5Bstop%5D={s}&filter%5Broute%5D={s}" ++
             "&filter%5Bdirection_id%5D={d}&sort=departure_time&page%5Blimit%5D=6" ++
             "&fields%5Bprediction%5D=departure_time,arrival_time", .{ line.stop, line.route, line.direction });
         const body = try net.getTls(host, path, buf);

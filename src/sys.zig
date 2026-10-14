@@ -12,7 +12,7 @@ pub var utc_offset: i64 = 0;
 pub fn log(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const t: u64 = @intCast(@mod(realtimeSec() + utc_offset, 86400));
-    const s = std.fmt.bufPrint(&buf, "{d:0>2}:{d:0>2}:{d:0>2} " ++ fmt ++ "\n", .{ t / 3600, t % 3600 / 60, t % 60 } ++ args) catch return;
+    const s = std.mem.print(&buf, "{d:0>2}:{d:0>2}:{d:0>2} " ++ fmt ++ "\n", .{ t / 3600, t % 3600 / 60, t % 60 } ++ args) catch return;
     _ = c.write(2, s.ptr, s.len);
 }
 
@@ -34,7 +34,7 @@ pub fn realtimeSec() i64 {
 pub fn localHHMM(offset: i64) [5]u8 {
     const t: u64 = @intCast(@mod(realtimeSec() + offset, 86400));
     var out: [5]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{d:0>2}:{d:0>2}", .{ t / 3600, t % 3600 / 60 }) catch unreachable;
+    _ = std.mem.print(&out, "{d:0>2}:{d:0>2}", .{ t / 3600, t % 3600 / 60 }) catch unreachable;
     return out;
 }
 
@@ -64,7 +64,7 @@ extern "c" fn fread(ptr: [*]u8, size: usize, n: usize, f: *anyopaque) usize;
 /// Run a shell command, logging if it fails.
 pub fn run(comptime fmt: []const u8, args: anytype) void {
     var buf: [320]u8 = undefined;
-    const cmd = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
+    const cmd = std.mem.printSentinel(&buf, fmt, args, 0) catch return;
     if (system(cmd) != 0) log("'{s}' failed", .{cmd});
 }
 

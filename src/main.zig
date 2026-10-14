@@ -139,7 +139,7 @@ const Inputs = struct {
         var in = Inputs{};
         for (0..max) |i| {
             var pb: [32]u8 = undefined;
-            const path = std.fmt.bufPrintZ(&pb, "/dev/input/event{d}", .{i}) catch unreachable;
+            const path = std.mem.printSentinel(&pb, "/dev/input/event{d}", .{i}, 0) catch unreachable;
             const fd = c.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true });
             if (fd < 0) continue;
             in.fds[in.n] = .{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
@@ -290,7 +290,7 @@ const App = struct {
             app.logBattery(@errorName(err));
             if (app.weather) |*w| app.draw(w, .{ .failed = @errorName(err) }) else {
                 var mb: [96]u8 = undefined;
-                ui.renderMessage(&screen, app.cfg.name, std.fmt.bufPrint(&mb, "No data yet ({s}), retrying…", .{@errorName(err)}) catch "No data");
+                ui.renderMessage(&screen, app.cfg.name, std.mem.print(&mb, "No data yet ({s}), retrying…", .{@errorName(err)}) catch "No data");
             }
             return false;
         }
@@ -322,32 +322,26 @@ const App = struct {
         }
     }
 
-    /// With --sleep: update, give the user a minute if the screen is awake,
-    /// then let powerd suspend the Kindle until the next update is due.
+    /// With --sleep: update, give the user a minute when they are around
+    /// (at start, or after the power switch woke us), then suspend the
+    /// Kindle until the next update is due.
     fn runAsleep(app: *App) void {
-        defer kindle.cancelArm();
+        kindle.logRtcInfo();
         var due: i64 = 0; // wall-clock time the next update is due
+        var user_awake = true; // just started: offer the key window
         // M was pressed: presses during that refresh are impatient repeats,
         // not a request to switch back.
         var drain_after_update = false;
-        // powerd wakes us later than asked, roughly in proportion to the
-        // sleep (with the stock UI paused: 1579 s -> 1811 s, 60 s -> 71 s),
-        // so ask for (time left) / ratio, and learn the ratio as we go.
-        var ratio: f64 = 1.15;
-        // From pressing the power button to powerd's readyToSuspend.
-        const ready_delay = 60;
 
         while (true) {
-            if (sys.realtimeSec() >= due - 60) { // close enough: update now rather than sleep again
+            if (sys.realtimeSec() >= due - 30) { // close enough: update now rather than sleep again
                 const ok = app.update();
                 if (drain_after_update) app.inputs.drain("pressed while switching views");
                 drain_after_update = false;
                 due = sys.realtimeSec() + if (ok) app.period() else @min(app.period(), 300);
             }
 
-            const awake = kindle.powerState() == .active;
-            if (awake) {
-                // Just started, or the user slid the power switch.
+            if (user_awake) {
                 log("awake: Home exits, M switches view, other keys refresh; sleeping in 60 s", .{});
                 switch (app.inputs.wait(60_000)) {
                     .quit => return,
@@ -362,47 +356,29 @@ const App = struct {
                         due = 0;
                         continue;
                     },
-                    .timeout => {},
+                    .timeout => user_awake = false,
                 }
             }
 
-            // Arm on powerd's readyToSuspend event (~ready_delay from now).
-            const wake_in = wakeIn(due - sys.realtimeSec() - ready_delay, ratio);
-            kindle.armOnReady(wake_in);
-            if (awake) kindle.enterScreenSaver();
-            app.fb.show(&screen); // repaint in case a screensaver image was drawn
-            log("sleeping; rtcWakeup {d}s once powerd is ready (ratio {d:.2})", .{ wake_in, ratio });
-
-            const result = kindle.waitForSleep(900, wakeIn(due - sys.realtimeSec(), ratio));
-            const armed = kindle.armed();
-            if (kindle.powerState() == .active) {
-                if (result == .resumed) log("resumed by the power switch after {d}s asleep", .{result.resumed});
-                kindle.cancelArm();
-                app.wokenBySwitch();
-                due = 0;
+            const asked = @max(60, due - sys.realtimeSec());
+            const start = sys.realtimeSec();
+            kindle.suspendFor(asked) catch {
+                // Could not suspend: stay awake until the next update instead.
+                log("suspend failed; staying awake for {d}s", .{asked});
+                if (app.inputs.wait(asked * 1000) == .quit) return;
                 continue;
-            }
-            switch (result) {
-                .resumed => |slept| {
-                    const a = armed orelse {
-                        log("resumed after {d}s asleep, but the alarm was never armed (powerd's own wake?)", .{slept});
-                        continue;
-                    };
-                    // Timer wake: fold the observed ratio into the estimate.
-                    const took: f64 = @floatFromInt(sys.realtimeSec() - a.at);
-                    const observed = took / @as(f64, @floatFromInt(a.seconds));
-                    ratio = std.math.clamp((ratio + observed) / 2, 1.0, 2.0);
-                    log("resumed after {d}s asleep; asked {d}s, took {d:.0}s (x{d:.2}); {d}s until due", .{ slept, a.seconds, took, observed, due - sys.realtimeSec() });
+            };
+            const slept = sys.realtimeSec() - start;
+            switch (kindle.logWakeInfo()) {
+                .power_button => {
+                    log("woken by the power switch after {d}s (asked {d}s)", .{ slept, asked });
+                    app.wokenBySwitch();
+                    user_awake = true;
+                    due = 0;
                 },
-                .woken => {},
-                .timeout => log("powerd never suspended within 15 min; retrying", .{}),
+                else => log("woke after {d}s (asked {d}s, {d}s until due)", .{ slept, asked, due - sys.realtimeSec() }),
             }
         }
-    }
-
-    /// Seconds to request from powerd so we wake after `left` seconds.
-    fn wakeIn(left: i64, ratio: f64) i64 {
-        return @max(60, @as(i64, @intFromFloat(@as(f64, @floatFromInt(left)) / ratio)));
     }
 
     /// The power switch woke us: drop keys pressed while asleep and show that
@@ -453,4 +429,5 @@ pub fn main(init: std.process.Init.Minimal) !void {
 test {
     _ = ui;
     _ = mbta;
+    _ = display;
 }

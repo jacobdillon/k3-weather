@@ -50,7 +50,7 @@ pub fn render(canvas: *cv.Canvas, s: Screen) void {
 
     // Header
     cv.text(canvas, .bold, cv.fitSize(.bold, 32, 300, s.name), M, 50, .left, cv.black, s.name);
-    const date_s = std.fmt.bufPrint(&b1, "{s}, {s} {d}", .{ weekdays[weekday(today)], months[today.m - 1], today.d }) catch "";
+    const date_s = std.mem.print(&b1, "{s}, {s} {d}", .{ weekdays[weekday(today)], months[today.m - 1], today.d }) catch "";
     cv.text(canvas, .regular, 24, cv.W - M, 48, .right, cv.black, date_s);
     canvas.hline(M, cv.W - M, 68, 3, cv.black);
 
@@ -58,13 +58,13 @@ pub fn render(canvas: *cv.Canvas, s: Screen) void {
     icons.draw(canvas, icons.kindFor(w.code, w.is_day), 18, 82, 260);
     cv.text(canvas, .bold, 132, 432, 222, .center, cv.black, tempStr(&b1, w.temp));
     if (w.feels) |f| {
-        const t = std.fmt.bufPrint(&b2, "Feels like {s}", .{tempStr(&b1, f)}) catch "";
+        const t = std.mem.print(&b2, "Feels like {s}", .{tempStr(&b1, f)}) catch "";
         cv.text(canvas, .regular, 26, 432, 268, .center, cv.dark_gray, t);
     }
     {
         var hb: [16]u8 = undefined;
         var lb: [16]u8 = undefined;
-        const t = std.fmt.bufPrint(&b2, "H {s}   L {s}", .{ tempStr(&hb, w.days[0].hi), tempStr(&lb, w.days[0].lo) }) catch "";
+        const t = std.mem.print(&b2, "H {s}   L {s}", .{ tempStr(&hb, w.days[0].hi), tempStr(&lb, w.days[0].lo) }) catch "";
         cv.text(canvas, .bold, 32, 432, 318, .center, cv.black, t);
     }
 
@@ -80,24 +80,24 @@ pub fn render(canvas: *cv.Canvas, s: Screen) void {
         var hb: [32]u8 = undefined;
         if (w.days[0].pop) |p| {
             parts[n] = if (w.days[0].precip) |amt| switch (s.units) {
-                .metric => std.fmt.bufPrint(&pb, "Rain {d:.0}% · {d:.1} {s}", .{ p, amt, precip_unit }),
-                .imperial => std.fmt.bufPrint(&pb, "Rain {d:.0}% · {d:.2} {s}", .{ p, amt, precip_unit }),
-            } catch "" else std.fmt.bufPrint(&pb, "Rain {d:.0}%", .{p}) catch "";
+                .metric => std.mem.print(&pb, "Rain {d:.0}% · {d:.1} {s}", .{ p, amt, precip_unit }),
+                .imperial => std.mem.print(&pb, "Rain {d:.0}% · {d:.2} {s}", .{ p, amt, precip_unit }),
+            } catch "" else std.mem.print(&pb, "Rain {d:.0}%", .{p}) catch "";
             n += 1;
         }
         if (w.wind) |v| {
-            parts[n] = std.fmt.bufPrint(&wb, "Wind {d:.0} {s}", .{ v, wind_unit }) catch "";
+            parts[n] = std.mem.print(&wb, "Wind {d:.0} {s}", .{ v, wind_unit }) catch "";
             n += 1;
         }
         if (w.humidity) |h| {
-            parts[n] = std.fmt.bufPrint(&hb, "Hum {d:.0}%", .{h}) catch "";
+            parts[n] = std.mem.print(&hb, "Hum {d:.0}%", .{h}) catch "";
             n += 1;
         }
         const t = joinParts(&b3, parts[0..n], "    ");
         cv.text(canvas, .regular, cv.fitSize(.regular, 24, cv.W - 2 * M, t), cv.W / 2, 440, .center, cv.black, t);
         var rb: [16]u8 = undefined;
         var sb: [16]u8 = undefined;
-        const sun = std.fmt.bufPrint(&b2, "Sunrise {s}    Sunset {s}", .{ timeStr(&rb, &w.days[0].sunrise), timeStr(&sb, &w.days[0].sunset) }) catch "";
+        const sun = std.mem.print(&b2, "Sunrise {s}    Sunset {s}", .{ timeStr(&rb, &w.days[0].sunrise), timeStr(&sb, &w.days[0].sunset) }) catch "";
         cv.text(canvas, .regular, 24, cv.W / 2, 478, .center, cv.black, sun);
     }
 
@@ -108,9 +108,9 @@ pub fn render(canvas: *cv.Canvas, s: Screen) void {
         if (s.view == .mbta) renderMbta(canvas, board) else renderDays(canvas, w);
         const target = if (s.view == .mbta) "forecast" else "MBTA";
         const hint = if (s.sleep)
-            std.fmt.bufPrint(&b3, "Slide the power switch, then press M for {s}", .{target}) catch ""
+            std.mem.print(&b3, "Slide the power switch, then press M for {s}", .{target}) catch ""
         else
-            std.fmt.bufPrint(&b3, "Press M for {s}", .{target}) catch "";
+            std.mem.print(&b3, "Press M for {s}", .{target}) catch "";
         cv.text(canvas, .regular, 16, cv.W / 2, 794, .center, cv.dark_gray, hint);
     } else renderDays(canvas, w);
 
@@ -118,8 +118,8 @@ pub fn render(canvas: *cv.Canvas, s: Screen) void {
     var tb: [16]u8 = undefined;
     const as_of = timeStr(&tb, &w.as_of);
     const st = switch (s.status) {
-        .ok => std.fmt.bufPrint(&b3, "updated {s}", .{as_of}) catch "",
-        .failed => |e| std.fmt.bufPrint(&b3, "OFFLINE ({s}) · data from {s}", .{ e, as_of }) catch "",
+        .ok => std.mem.print(&b3, "updated {s}", .{as_of}) catch "",
+        .failed => |e| std.mem.print(&b3, "OFFLINE ({s}) · data from {s}", .{ e, as_of }) catch "",
         .note => |n| n,
     };
     cv.text(canvas, if (s.status == .note) .bold else .regular, 16, cv.W - M, 88, .right, if (s.status == .ok) cv.dark_gray else cv.black, st);
@@ -145,12 +145,12 @@ fn renderDays(canvas: *cv.Canvas, w: *const Weather) void {
         icons.draw(canvas, icons.kindFor(day.code, true), cx - 66, 548, 132);
         var hb: [16]u8 = undefined;
         var lb: [16]u8 = undefined;
-        const hl = std.fmt.bufPrint(&b1, "{s} / {s}", .{ tempStr(&hb, day.hi), tempStr(&lb, day.lo) }) catch "";
+        const hl = std.mem.print(&b1, "{s} / {s}", .{ tempStr(&hb, day.hi), tempStr(&lb, day.lo) }) catch "";
         cv.text(canvas, .bold, 36, cx, 714, .center, cv.black, hl);
         const d = icons.describe(day.code);
         cv.text(canvas, .regular, cv.fitSize(.regular, 22, cv.W / 2 - 24, d), cx, 744, .center, cv.black, d);
         if (day.pop) |p| {
-            const s = std.fmt.bufPrint(&b2, "Rain {d:.0}%", .{p}) catch "";
+            const s = std.mem.print(&b2, "Rain {d:.0}%", .{p}) catch "";
             cv.text(canvas, .regular, 20, cx, 768, .center, cv.dark_gray, s);
         }
     }
@@ -165,7 +165,7 @@ fn renderMbta(canvas: *cv.Canvas, board: *const mbta.Board) void {
     if (board.updated) |*hhmm| {
         var tb: [16]u8 = undefined;
         var sb: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&sb, "updated {s}", .{timeStr(&tb, hhmm)}) catch "";
+        const s = std.mem.print(&sb, "updated {s}", .{timeStr(&tb, hhmm)}) catch "";
         cv.text(canvas, .regular, 16, cv.W - M, 506 + 28, .right, cv.dark_gray, s);
         stamp_w = cv.textWidth(.regular, 16, s) + 16;
     }
@@ -177,7 +177,7 @@ fn renderMbta(canvas: *cv.Canvas, board: *const mbta.Board) void {
         cv.text(canvas, .bold, cv.fitSize(.bold, 24, label_w, line.label), M, y0 + 28, .left, cv.black, line.label);
         if (dep.err) |e| {
             var eb: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&eb, "Unavailable ({s})", .{e}) catch "Unavailable";
+            const s = std.mem.print(&eb, "Unavailable ({s})", .{e}) catch "Unavailable";
             cv.text(canvas, .regular, 26, M, y0 + 74, .left, cv.dark_gray, s);
         } else if (dep.n == 0) {
             cv.text(canvas, .regular, 26, M, y0 + 74, .left, cv.dark_gray, "No upcoming departures");
@@ -226,7 +226,7 @@ fn drawBattery(canvas: *cv.Canvas, x: i32, y: i32, bat: kindle.Battery) void {
 
     const low = bat.pct <= 20 and !bat.charging;
     var buf: [32]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{d}%{s}", .{
+    const s = std.mem.print(&buf, "{d}%{s}", .{
         bat.pct,
         if (bat.charging) " charging" else if (low) " - charge me" else "",
     }) catch "";
@@ -236,7 +236,7 @@ fn drawBattery(canvas: *cv.Canvas, x: i32, y: i32, bat: kindle.Battery) void {
 // ------------------------------------------------------------- formatting
 
 fn tempStr(buf: []u8, v: f64) []const u8 {
-    return std.fmt.bufPrint(buf, "{d}°", .{@as(i32, @intFromFloat(@round(v)))}) catch "?";
+    return std.mem.print(buf, "{d}°", .{@as(i32, @intFromFloat(@round(v)))}) catch "?";
 }
 
 /// "HH:MM" (24h) as 12-hour "h:MM" plus "AM"/"PM". Unparseable input is
@@ -246,7 +246,7 @@ const Time12 = struct { hm: []const u8, suffix: []const u8 };
 fn time12(buf: *[8]u8, hhmm: *const [5]u8) Time12 {
     const h = std.fmt.parseInt(u8, hhmm[0..2], 10) catch return .{ .hm = hhmm, .suffix = "" };
     if (h > 23) return .{ .hm = hhmm, .suffix = "" };
-    const hm = std.fmt.bufPrint(buf, "{d}:{s}", .{ if (h % 12 == 0) 12 else h % 12, hhmm[3..5] }) catch unreachable;
+    const hm = std.mem.print(buf, "{d}:{s}", .{ if (h % 12 == 0) 12 else h % 12, hhmm[3..5] }) catch unreachable;
     return .{ .hm = hm, .suffix = if (h < 12) "AM" else "PM" };
 }
 
@@ -255,7 +255,7 @@ fn timeStr(buf: *[16]u8, hhmm: *const [5]u8) []const u8 {
     var b: [8]u8 = undefined;
     const t = time12(&b, hhmm);
     if (t.suffix.len == 0) return hhmm;
-    return std.fmt.bufPrint(buf, "{s} {s}", .{ t.hm, t.suffix }) catch unreachable;
+    return std.mem.print(buf, "{s} {s}", .{ t.hm, t.suffix }) catch unreachable;
 }
 
 fn joinParts(buf: []u8, parts: []const []const u8, sep: []const u8) []const u8 {

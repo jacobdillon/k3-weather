@@ -50,14 +50,18 @@ run)
         [ -n "$m" ] && set -- "$@" --mbta "$m"
     done
 
+    # Keep logs across runs (one previous file), so a failed run is not lost
+    # when the display is restarted.
+    if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 200000 ]; then mv "$LOG" "$LOG.old"; fi
+    echo "=== $(date) start (SLEEP=$SLEEP WIFI_SAVER=$WIFI_SAVER VIEW=$VIEW)" >>"$LOG"
+
     "$EXT/bin/k3-weather" --lat "$LAT" --lon "$LON" --name "$NAME" \
         --units "$UNITS" --interval "$INTERVAL" --battery-log "$EXT/battery.csv" \
-        --mbta-interval "$MBTA_INTERVAL" --view "$VIEW" "$@" $EXTRA_ARGS >"$LOG" 2>&1 &
+        --mbta-interval "$MBTA_INTERVAL" --view "$VIEW" "$@" $EXTRA_ARGS >>"$LOG" 2>&1 &
     echo $! >"$PIDFILE"
     wait $!
 
     rm -f "$PIDFILE"
-    killall lipc-wait-event 2>/dev/null # a pending wake-up watcher
     killall -CONT cvm
     lipc-set-prop com.lab126.wifid enable 1
     lipc-set-prop com.lab126.powerd preventScreenSaver 0

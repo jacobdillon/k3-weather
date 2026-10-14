@@ -126,9 +126,9 @@ fn loadRoots(now_sec: i64) !void {
     const begin = "-----BEGIN CERTIFICATE-----";
     const end = "-----END CERTIFICATE-----";
     var it: usize = 0;
-    while (std.mem.indexOfPos(u8, root_pem, it, begin)) |b| {
+    while (std.mem.findPos(u8, root_pem, it, begin)) |b| {
         const start = b + begin.len;
-        const stop = std.mem.indexOfPos(u8, root_pem, start, end) orelse return error.BadPem;
+        const stop = std.mem.findPos(u8, root_pem, start, end) orelse return error.BadPem;
         it = stop + end.len;
         // Strip line breaks, then base64-decode into the bundle's byte store.
         var b64: [4096]u8 = undefined;
@@ -235,12 +235,12 @@ const FdWriter = struct {
 // ---------------------------------------------------------------- shared
 
 fn request(buf: []u8, host: []const u8, path: []const u8) Error![]const u8 {
-    return std.fmt.bufPrint(buf, "GET {s} HTTP/1.0\r\nHost: {s}\r\nUser-Agent: k3-weather/1.0\r\nAccept: application/json\r\nConnection: close\r\n\r\n", .{ path, host }) catch error.TooLarge;
+    return std.mem.print(buf, "GET {s} HTTP/1.0\r\nHost: {s}\r\nUser-Agent: k3-weather/1.0\r\nAccept: application/json\r\nConnection: close\r\n\r\n", .{ path, host }) catch error.TooLarge;
 }
 
 /// Check for "HTTP/1.x 200" and return what follows the headers.
 fn body(resp: []u8) Error![]u8 {
-    const hdr_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return error.BadResponse;
+    const hdr_end = std.mem.find(u8, resp, "\r\n\r\n") orelse return error.BadResponse;
     if (resp.len < 12 or !std.mem.eql(u8, resp[9..12], "200")) return error.HttpStatus;
     return resp[hdr_end + 4 ..];
 }
@@ -250,7 +250,7 @@ fn connectHost(host: [:0]const u8, port: [:0]const u8) Error!c.fd_t {
     hints.family = c.AF.INET;
     hints.socktype = c.SOCK.STREAM;
     var res: ?*c.addrinfo = null;
-    if (@intFromEnum(c.getaddrinfo(host, port, &hints, &res)) != 0 or res == null) return error.Resolve;
+    if (@backingInt(c.getaddrinfo(host, port, &hints, &res)) != 0 or res == null) return error.Resolve;
     defer c.freeaddrinfo(res.?);
 
     var ai: ?*c.addrinfo = res;
@@ -274,7 +274,7 @@ fn writeAll(fd: c.fd_t, data: []const u8) Error!void {
 }
 
 fn errno() c.E {
-    return @enumFromInt(c._errno().*);
+    return @fromBackingInt(@intCast(c._errno().*));
 }
 
 fn connectTimeout(a: *c.addrinfo) ?c.fd_t {

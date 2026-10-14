@@ -206,12 +206,18 @@ const Utf8 = struct {
             return '?';
         }
         defer u.i += len;
-        return std.unicode.utf8Decode(u.s[u.i..][0..len]) catch '?';
+        const b = u.s[u.i..];
+        return switch (len) {
+            2 => std.unicode.utf8Decode2(b[0..2].*) catch '?',
+            3 => std.unicode.utf8Decode3(b[0..3].*) catch '?',
+            4 => std.unicode.utf8Decode4(b[0..4].*) catch '?',
+            else => b[0],
+        };
     }
 };
 
 pub fn textWidth(font: Font, size: f32, s: []const u8) i32 {
-    const f = @intFromEnum(font);
+    const f = @backingInt(font);
     const scale = ttf_scale(f, size);
     var w: f32 = 0;
     var it = Utf8{ .s = s };
@@ -232,7 +238,7 @@ pub const Align = enum { left, center, right };
 /// Draw `s` with its baseline at `y`. `x` is the left edge, center or right
 /// edge depending on `al`.
 pub fn text(c: *Canvas, font: Font, size: f32, x: i32, y: i32, al: Align, color: u8, s: []const u8) void {
-    const f = @intFromEnum(font);
+    const f = @backingInt(font);
     const scale = ttf_scale(f, size);
     const w = textWidth(font, size, s);
     var pen: f32 = @floatFromInt(switch (al) {

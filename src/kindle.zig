@@ -36,7 +36,7 @@ fn batteryFromPowerd() ?u8 {
     var buf: [1024]u8 = undefined;
     const s = sys.output("lipc-get-prop com.lab126.powerd status 2>/dev/null", &buf) orelse return null;
     const key = "Battery Level:";
-    const i = std.mem.indexOf(u8, s, key) orelse return null;
+    const i = std.mem.find(u8, s, key) orelse return null;
     return leadingInt(std.mem.trimStart(u8, s[i + key.len ..], " "));
 }
 
@@ -59,7 +59,7 @@ pub fn logBattery(path: [:0]const u8, bat: ?Battery, fetch_result: []const u8, w
     var buf: [160]u8 = undefined;
     const pct: i32 = if (bat) |b| b.pct else -1;
     const charging = bat != null and bat.?.charging;
-    const row = std.fmt.bufPrint(&buf, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z,{d},{d},{d},{s},{d}\n", .{
+    const row = std.mem.print(&buf, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z,{d},{d},{d},{s},{d}\n", .{
         yd.year, md.month.numeric(), md.day_index + 1, // date
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(), // time
         now,                  pct,                     @intFromBool(charging),
@@ -80,131 +80,80 @@ pub fn setWifi(on: bool) void {
     sys.run("lipc-set-prop com.lab126.wifid enable {d}", .{@intFromBool(on)});
 }
 
-// ----------------------------------------------------------------- powerd
+// ---------------------------------------------------------------- suspend
 //
-// Between updates the Kindle is put to sleep through powerd, which is the
-// only route that works on the K3 (see sleeptest.sh / sleeptest.log):
-//   1. go to the screensaver (powerd_test -p = a power-switch press)
-//   2. ~60 s later powerd reports "readyToSuspend"; in that window we set
-//      rtcWakeup, and powerd programs the PMIC alarm as it suspends.
-//      (Writing the alarm ourselves is useless: powerd overwrites it.
-//      deferSuspend is rejected with lipcPropErrInvalidState.)
-//   3. the alarm wakes the Kindle into the screensaver state, and powerd
-//      suspends again ~60 s later, so steps 2-3 repeat.
+// Sleep between updates by suspending the kernel directly, the way
+// kindle-dash does on the Kindle 4: arm Amazon's RTC driver with
+// mxc_rtc.0/wakeup_enable (seconds from now), then write "mem" to
+// /sys/power/state, which returns once the Kindle wakes.
+//
+// powerd stays out of it: the launcher keeps preventScreenSaver=1 and the
+// stock UI paused, so there is no screensaver (and no flash). Going through
+// powerd instead (rtcWakeup in its readyToSuspend window) proved unreliable
+// on the K3: with the stock UI paused the alarm was accepted but never
+// programmed, and with it resumed powerd never became ready at all.
 
-pub const PowerState = enum { active, screen_saver, ready, other };
+const wakeup_enable = "/sys/devices/platform/mxc_rtc.0/wakeup_enable";
 
-/// powerd's state name, e.g. "active", "screenSaver", "readyToSuspend".
-fn stateName(buf: *[64]u8) []const u8 {
-    const out = sys.output("lipc-get-prop com.lab126.powerd state 2>/dev/null", buf) orelse return "";
-    return std.mem.trim(u8, out, " \r\n");
+/// Suspend for about `seconds`. Returns once the Kindle wakes (timer or
+/// power switch), or an error if the kernel refused to suspend.
+pub fn suspendFor(seconds: i64) !void {
+    var buf: [24]u8 = undefined;
+    var vb: [32]u8 = undefined;
+    const before = std.mem.trim(u8, sys.readFile(wakeup_enable, &vb) catch "?", " \r\n");
+    try writeSysfs(wakeup_enable, try std.mem.print(&buf, "{d}", .{seconds}));
+    const after = std.mem.trim(u8, sys.readFile(wakeup_enable, &vb) catch "?", " \r\n");
+    sys.log("suspending for {d}s (wakeup_enable {s} -> {s})", .{ seconds, before, after });
+    try writeSysfs("/sys/power/state", "mem");
 }
 
-pub fn powerState() PowerState {
-    var buf: [64]u8 = undefined;
-    return classify(stateName(&buf));
+fn writeSysfs(path: [:0]const u8, data: []const u8) !void {
+    const fd = c.open(path, .{ .ACCMODE = .WRONLY });
+    if (fd < 0) return errnoError(path);
+    defer _ = c.close(fd);
+    if (c.write(fd, data.ptr, data.len) < 0) return errnoError(path);
 }
 
-fn classify(s: []const u8) PowerState {
-    if (std.mem.eql(u8, s, "active")) return .active;
-    if (std.mem.eql(u8, s, "screenSaver")) return .screen_saver;
-    if (std.mem.eql(u8, s, "readyToSuspend")) return .ready;
+fn errnoError(path: []const u8) error{SysfsWrite} {
+    const e: c.E = @fromBackingInt(@intCast(c._errno().*));
+    sys.log("writing {s} failed: {s}", .{ path, @tagName(e) });
+    return error.SysfsWrite;
+}
+
+pub const WakeSource = enum { power_button, unknown, other };
+
+/// After a resume: log what woke the Kindle (from the kernel log, e.g.
+/// "Power Button") and which alarm the PMIC clock holds.
+pub fn logWakeInfo() WakeSource {
+    var buf: [512]u8 = undefined;
+    const line = sys.output("dmesg | grep 'wakeup:source=' | tail -n 1", &buf) orelse "";
+    const key = "source=";
+    const source = if (std.mem.find(u8, line, key)) |i|
+        std.mem.trimEnd(u8, std.mem.sliceTo(line[i + key.len ..], '\n'), ": \r")
+    else
+        "unknown";
+    var rbuf: [512]u8 = undefined;
+    const rtc = sys.output("grep -e rtc_time -e alrm_time -e alrm_date /proc/driver/rtc", &rbuf) orelse "";
+    var flat: [160]u8 = undefined;
+    var n: usize = 0;
+    for (rtc) |ch| {
+        if (n == flat.len) break;
+        flat[n] = if (ch == '\n' or ch == '\t') ' ' else ch;
+        n += 1;
+    }
+    sys.log("woken by: {s}; {s}", .{ source, std.mem.trim(u8, flat[0..n], " ") });
+    if (std.mem.eql(u8, source, "unknown")) return .unknown;
+    if (std.mem.find(u8, source, "Power") != null) return .power_button;
     return .other;
 }
 
-/// Let powerd take over: allow the screensaver and enter it now.
-pub fn enterScreenSaver() void {
-    sys.run("lipc-set-prop com.lab126.powerd preventScreenSaver 0", .{});
-    sys.run("powerd_test -p >/dev/null", .{});
-    // Log where powerd went and how long it plans to stay there.
-    sys.sleepMs(2000);
+/// Log the Lab126 RTC sysfs attributes, e.g. mxc_rtc.0/wakeup_enable, which
+/// kindle-dash uses on the Kindle 4 to arm a wake-up without powerd.
+pub fn logRtcInfo() void {
     var buf: [1024]u8 = undefined;
-    const status = sys.output("lipc-get-prop com.lab126.powerd status 2>/dev/null", &buf) orelse "";
-    var lines = std.mem.tokenizeScalar(u8, status, '\n');
-    const state = lines.next() orelse "?";
-    const remaining = lines.next() orelse "?";
-    sys.log("pressed power button: {s}; {s}", .{ state, remaining });
-}
-
-/// Ask powerd to wake us `seconds` from now. Only accepted while ready to
-/// suspend.
-pub fn armWakeup(seconds: i64) void {
-    sys.run("lipc-set-prop -i com.lab126.powerd rtcWakeup {d}", .{seconds});
-}
-
-/// Arm the wake-up alarm the moment powerd reports readyToSuspend.
-///
-/// powerd only accepts rtcWakeup in that state, and with the stock UI paused
-/// nothing holds it there: powerd suspends within seconds, so polling for it
-/// can miss the window (and then only powerd's own ~9 min alarm wakes us).
-/// Instead leave a shell blocked on the event, which arms immediately and
-/// records when it did so in `armed_file`.
-pub fn armOnReady(seconds: i64) void {
-    cancelArm();
-    sys.run("rm -f " ++ armed_file ++ "; (lipc-wait-event com.lab126.powerd readyToSuspend >/dev/null" ++
-        " && lipc-set-prop -i com.lab126.powerd rtcWakeup {d} && echo $(date +%s) {d} > " ++ armed_file ++ ") &", .{ seconds, seconds });
-}
-
-/// Stop a pending armOnReady watcher.
-pub fn cancelArm() void {
-    sys.run("killall lipc-wait-event 2>/dev/null; true", .{});
-}
-
-pub const armed_file = "/tmp/k3-weather.armed";
-
-pub const Armed = struct { at: i64, seconds: i64 };
-
-/// When (epoch seconds) and for how long the alarm was set, if it was.
-pub fn armed() ?Armed {
-    var buf: [48]u8 = undefined;
-    const s = sys.readFile(armed_file, &buf) catch return null;
-    var it = std.mem.tokenizeAny(u8, s, " \r\n");
-    const at = std.fmt.parseInt(i64, it.next() orelse return null, 10) catch return null;
-    const seconds = std.fmt.parseInt(i64, it.next() orelse return null, 10) catch return null;
-    return .{ .at = at, .seconds = seconds };
-}
-
-pub const SleepResult = union(enum) {
-    /// Suspended and resumed; seconds spent asleep.
-    resumed: i64,
-    /// The screen was woken (power switch) without a suspend.
-    woken,
-    timeout,
-};
-
-/// Wait for the Kindle to suspend and resume (seen as a jump in wall-clock
-/// time), logging powerd state changes. If we happen to see readyToSuspend
-/// ourselves, arm `fallback_seconds` too, in case the event watcher failed.
-pub fn waitForSleep(timeout_s: i64, fallback_seconds: i64) SleepResult {
-    const start = sys.nowMs();
-    var last = sys.realtimeSec();
-    var prev_buf: [64]u8 = undefined;
-    var prev: []const u8 = "";
-    var tried = false;
-    while (sys.nowMs() - start < timeout_s * 1000) {
-        const t = sys.realtimeSec();
-        if (t - last > 5) return .{ .resumed = t - last };
-        last = t;
-
-        var buf: [64]u8 = undefined;
-        const name = stateName(&buf);
-        if (!std.mem.eql(u8, name, prev)) {
-            sys.log("powerd: {s} after {d}s", .{ name, @divTrunc(sys.nowMs() - start, 1000) });
-            @memcpy(prev_buf[0..name.len], name);
-            prev = prev_buf[0..name.len];
-        }
-        switch (classify(name)) {
-            .active => return .woken,
-            // Only if the event watcher has not armed already.
-            .ready => if (!tried and armed() == null) {
-                armWakeup(fallback_seconds);
-                sys.run("echo $(date +%s) {d} > " ++ armed_file, .{fallback_seconds});
-                sys.log("watcher missed readyToSuspend; armed rtcWakeup {d}s", .{fallback_seconds});
-                tried = true;
-            },
-            else => {},
-        }
-        sys.sleepMs(1000);
-    }
-    return .timeout;
+    const out = sys.output("for d in /sys/devices/platform/mxc_rtc.0 /sys/devices/platform/pmic_rtc.1; do " ++
+        "echo \"$d: $(ls $d 2>&1 | tr '\\n' ' ')\"; done; " ++
+        "for f in /sys/devices/platform/*rtc*/wakeup_enable; do [ -f $f ] && echo \"$f = $(cat $f)\"; done", &buf) orelse return;
+    var lines = std.mem.tokenizeScalar(u8, out, '\n');
+    while (lines.next()) |line| sys.log("rtc: {s}", .{line});
 }

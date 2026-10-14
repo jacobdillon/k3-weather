@@ -146,37 +146,13 @@ pub const Framebuffer = struct {
     }
 };
 
-/// Write the canvas as an 8-bit grayscale PNG using uncompressed deflate.
+/// Write the canvas as an 8-bit grayscale PNG. The file is written to a
+/// temporary name and renamed into place, so a reader (e.g. the Kindle's
+/// screensaver) never sees a half-written image.
 pub fn writePng(path: [:0]const u8, canvas: *const cv.Canvas) !void {
-    const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o644));
-    if (fd < 0) return error.PngOpen;
-    defer _ = c.close(fd);
-
-    // zlib stream: header, one stored block per row (filter byte + pixels), adler32
-    const row_len = cv.W + 1;
-    const block_len = 5 + row_len;
-    const zlen = 2 + cv.H * block_len + 4;
-    const z = try std.heap.c_allocator.alloc(u8, zlen);
-    defer std.heap.c_allocator.free(z);
-    z[0] = 0x78;
-    z[1] = 0x01;
-    var a: u32 = 1;
-    var b: u32 = 0;
-    var o: usize = 2;
-    for (0..cv.H) |y| {
-        z[o] = if (y == cv.H - 1) 1 else 0;
-        std.mem.writeInt(u16, z[o + 1 ..][0..2], row_len, .little);
-        std.mem.writeInt(u16, z[o + 3 ..][0..2], ~@as(u16, row_len), .little);
-        o += 5;
-        z[o] = 0;
-        @memcpy(z[o + 1 ..][0..cv.W], canvas.px[y * cv.W ..][0..cv.W]);
-        for (z[o .. o + row_len]) |byte| {
-            a = (a + byte) % 65521;
-            b = (b + a) % 65521;
-        }
-        o += row_len;
-    }
-    std.mem.writeInt(u32, z[o..][0..4], (b << 16) | a, .big);
+    const gpa = std.heap.c_allocator;
+    const z = try compressRows(gpa, canvas);
+    defer gpa.free(z.buf);
 
     var ihdr: [13]u8 = undefined;
     std.mem.writeInt(u32, ihdr[0..4], cv.W, .big);
@@ -187,10 +163,58 @@ pub fn writePng(path: [:0]const u8, canvas: *const cv.Canvas) !void {
     ihdr[11] = 0;
     ihdr[12] = 0;
 
+    var tmp_buf: [512]u8 = undefined;
+    const tmp = try std.mem.printSentinel(&tmp_buf, "{s}.tmp", .{path}, 0);
+    const fd = c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o644));
+    if (fd < 0) return error.PngOpen;
     writeAll(fd, "\x89PNG\r\n\x1a\n");
     chunk(fd, "IHDR", &ihdr);
-    chunk(fd, "IDAT", z);
+    chunk(fd, "IDAT", z.data);
     chunk(fd, "IEND", "");
+    _ = c.fsync(fd);
+    _ = c.close(fd);
+    if (c.rename(tmp, path) != 0) return error.PngRename;
+}
+
+/// The PNG image data: each row prefixed with filter type 0, as a zlib stream.
+fn compressRows(gpa: std.mem.Allocator, canvas: *const cv.Canvas) !struct { buf: []u8, data: []u8 } {
+    const flate = std.compress.flate;
+    // Worst case is barely above the raw size; leave generous headroom.
+    const buf = try gpa.alloc(u8, (cv.W + 1) * cv.H + 64 * 1024);
+    errdefer gpa.free(buf);
+    var out: std.Io.Writer = .fixed(buf);
+    const window = try gpa.alloc(u8, flate.max_window_len);
+    defer gpa.free(window);
+    const z = try gpa.create(flate.Compress);
+    defer gpa.destroy(z);
+    z.* = try flate.Compress.init(&out, window, .zlib, .fastest);
+    for (0..cv.H) |y| {
+        try z.writer.writeByte(0);
+        try z.writer.writeAll(canvas.px[y * cv.W ..][0..cv.W]);
+    }
+    try z.finish();
+    return .{ .buf = buf, .data = out.buffered() };
+}
+
+test compressRows {
+    var canvas: cv.Canvas = .{};
+    canvas.clear(cv.white);
+    canvas.fillRect(100, 100, 200, 300, cv.black);
+    for (0..cv.H) |y| canvas.px[y * cv.W + y % cv.W] = @intCast(y % 256);
+
+    const gpa = std.testing.allocator;
+    const z = try compressRows(gpa, &canvas);
+    defer gpa.free(z.buf);
+    try std.testing.expect(z.data.len < (cv.W + 1) * cv.H / 10); // mostly white compresses well
+
+    // Round-trip through the decompressor and compare every pixel.
+    var in: std.Io.Reader = .fixed(z.data);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var d: std.compress.flate.Decompress = .init(&in, .zlib, &window);
+    for (0..cv.H) |y| {
+        try std.testing.expectEqual(@as(u8, 0), try d.reader.takeByte());
+        try std.testing.expectEqualSlices(u8, canvas.px[y * cv.W ..][0..cv.W], try d.reader.take(cv.W));
+    }
 }
 
 fn chunk(fd: c.fd_t, kind: *const [4]u8, data: []const u8) void {
