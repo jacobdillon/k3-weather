@@ -108,8 +108,6 @@ For comparison, staying awake with the wifi saver on and 5-minute MBTA refreshes
 - With the stock UI paused, powerd accepted the request but never programmed the alarm.
 - With the stock UI resumed for the sleep, powerd never became ready at all.
 
-The KUAL menu's **Sleep/wake test** (`bin/sleeptest.sh`) is the diagnostic used for those experiments. It isn't needed for normal use.
-
 ## MBTA departures
 
 Each row in `weather.conf` is `STOP ROUTE DIRECTION LABEL`:
