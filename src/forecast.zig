@@ -201,3 +201,58 @@ pub fn fetch(lat: []const u8, lon: []const u8, units: Units, buf: []u8) !Weather
     });
     return parse(try net.get("api.open-meteo.com", path, buf));
 }
+
+test "parse blends the models" {
+    const json =
+        \\{"utc_offset_seconds":-14400,
+        \\ "current":{"time":"2026-10-13T14:45","is_day":1},
+        \\ "minutely_15":{"time":["2026-10-13T14:45"],
+        \\  "temperature_2m_gfs_seamless":[56.0],"temperature_2m_ecmwf_ifs025":[62.0],"temperature_2m_icon_seamless":[61.0],
+        \\  "relative_humidity_2m_gfs_seamless":[90],"relative_humidity_2m_ecmwf_ifs025":[null],"relative_humidity_2m_icon_seamless":[80],
+        \\  "weather_code_gfs_seamless":[3],"weather_code_ecmwf_ifs025":[61],"weather_code_icon_seamless":[61]},
+        \\ "daily":{"time":["2026-10-13","2026-10-14","2026-10-15"],
+        \\  "weather_code_gfs_seamless":[51,61,3],"weather_code_ecmwf_ifs025":[51,51,2],"weather_code_icon_seamless":[80,3,2],
+        \\  "temperature_2m_max_gfs_seamless":[60,70,62],"temperature_2m_max_ecmwf_ifs025":[62,76,60],"temperature_2m_max_icon_seamless":[61,76,61],
+        \\  "temperature_2m_min_gfs_seamless":[52,52,47],"temperature_2m_min_ecmwf_ifs025":[55,60,48],"temperature_2m_min_icon_seamless":[54,59,43],
+        \\  "precipitation_probability_max_gfs_seamless":[20,10,0],"precipitation_probability_max_ecmwf_ifs025":[80,50,0],"precipitation_probability_max_icon_seamless":[null,null,null],
+        \\  "sunrise_gfs_seamless":["2026-10-13T06:55","2026-10-14T06:56","2026-10-15T06:57"],
+        \\  "sunset_gfs_seamless":["2026-10-13T18:05","2026-10-14T18:03","2026-10-15T18:02"]}}
+    ;
+    const w = try parse(json);
+    try std.testing.expectApproxEqAbs(@as(f64, 59.67), w.temp, 0.01); // mean of 56, 62, 61
+    try std.testing.expectApproxEqAbs(@as(f64, 85), w.humidity.?, 0.01); // null model skipped
+    try std.testing.expectEqual(@as(i32, 61), w.code); // 2 of 3 say rain
+    try std.testing.expect(w.feels == null); // no model has it
+    try std.testing.expectEqual(@as(?i64, -14400), w.utc_offset);
+    try std.testing.expectEqualStrings("14:45", &w.as_of);
+
+    try std.testing.expectEqual(@as(i32, 51), w.days[0].code); // 51, 51, 80
+    try std.testing.expectEqual(@as(i32, 61), w.days[1].code); // three-way tie: first model wins
+    try std.testing.expectEqual(@as(i32, 2), w.days[2].code); // 3, 2, 2
+    try std.testing.expectApproxEqAbs(@as(f64, 74), w.days[1].hi, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 50), w.days[0].pop.?, 0.01); // ICON has none
+    try std.testing.expect(w.days[0].precip == null);
+    try std.testing.expectEqualStrings("2026-10-14", &w.days[1].date);
+    try std.testing.expectEqualStrings("06:55", &w.days[0].sunrise);
+    try std.testing.expectEqualStrings("18:05", &w.days[0].sunset);
+}
+
+test "parse falls back to a single-model response" {
+    const json =
+        \\{"current":{"time":"2026-10-13T21:45","temperature_2m":-3.4,"weather_code":0,"is_day":0},
+        \\ "daily":{"time":["2026-10-13","2026-10-14","2026-10-15"],"weather_code":[0,75,95],
+        \\  "temperature_2m_max":[1,2,3],"temperature_2m_min":[-5,-4,-3]}}
+    ;
+    const w = try parse(json);
+    try std.testing.expectApproxEqAbs(@as(f64, -3.4), w.temp, 0.001);
+    try std.testing.expect(!w.is_day);
+    try std.testing.expectEqual(@as(i32, 95), w.days[2].code);
+    try std.testing.expect(w.utc_offset == null);
+}
+
+test "parse rejects incomplete responses" {
+    try std.testing.expectError(error.BadResponse, parse("{\"daily\":{}}"));
+    try std.testing.expectError(error.NotEnoughDays, parse(
+        \\{"current":{"temperature_2m":1},"daily":{"time":["2026-10-13"]}}
+    ));
+}

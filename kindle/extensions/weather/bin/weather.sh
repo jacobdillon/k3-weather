@@ -14,6 +14,7 @@ WIFI_SAVER=1
 SLEEP=1
 MBTA_INTERVAL=300
 VIEW=mbta
+QUIET_HOURS="02:00-04:30" # weather.conf can set QUIET_HOURS="" to turn it off
 EXTRA_ARGS=
 [ -f "$EXT/weather.conf" ] && . "$EXT/weather.conf"
 [ "$WIFI_SAVER" = 1 ] && EXTRA_ARGS="$EXTRA_ARGS --wifi-saver"
@@ -49,6 +50,7 @@ run)
     for m in "$MBTA1" "$MBTA2" "$MBTA3"; do
         [ -n "$m" ] && set -- "$@" --mbta "$m"
     done
+    [ -n "$QUIET_HOURS" ] && set -- "$@" --quiet-hours "$QUIET_HOURS"
 
     # Keep logs across runs (one previous file), so a failed run is not lost
     # when the display is restarted.

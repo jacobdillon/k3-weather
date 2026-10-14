@@ -45,6 +45,8 @@ const Config = struct {
     /// Refresh period while the MBTA view is showing.
     mbta_interval: u32 = 300,
     view: ui.View = .days,
+    /// Local time window with no MBTA updates (the T isn't running).
+    quiet: ?QuietHours = null,
 };
 
 fn usage() noreturn {
@@ -66,6 +68,7 @@ fn usage() noreturn {
         \\                         "place-cntsq Red 1 Red to Alewife @ Central"
         \\  --mbta-interval SECONDS refresh period in the MBTA view (default 300)
         \\  --view days|mbta       which bottom half to start with (default days)
+        \\  --quiet-hours HH:MM-HH:MM  no MBTA updates in this local time window
     , .{});
     std.process.exit(2);
 }
@@ -102,6 +105,7 @@ fn parseArgs(argv: []const [*:0]const u8) Config {
             else if (eql(a, "--mbta")) cfg.board.add(v) catch usage() //
             else if (eql(a, "--mbta-interval")) cfg.mbta_interval = seconds(v) //
             else if (eql(a, "--view")) cfg.view = std.meta.stringToEnum(ui.View, v) orelse usage() //
+            else if (eql(a, "--quiet-hours")) cfg.quiet = QuietHours.parse(v) orelse usage() //
             else usage();
         }
     }
@@ -115,6 +119,69 @@ fn eql(a: []const u8, b: []const u8) bool {
 /// A period in seconds, at least a minute.
 fn seconds(v: []const u8) u32 {
     return @max(60, std.fmt.parseInt(u32, v, 10) catch usage());
+}
+
+/// A daily local-time window such as "02:00-04:30"; it may wrap past
+/// midnight ("23:00-05:00").
+const QuietHours = struct {
+    /// Minutes after midnight.
+    start: u32,
+    end: u32,
+
+    fn parse(s: []const u8) ?QuietHours {
+        const dash = std.mem.findScalar(u8, s, '-') orelse return null;
+        const start = minutes(s[0..dash]) orelse return null;
+        const end = minutes(s[dash + 1 ..]) orelse return null;
+        if (start == end) return null;
+        return .{ .start = start, .end = end };
+    }
+
+    fn minutes(hhmm: []const u8) ?u32 {
+        const colon = std.mem.findScalar(u8, hhmm, ':') orelse return null;
+        const h = std.fmt.parseInt(u32, hhmm[0..colon], 10) catch return null;
+        const m = std.fmt.parseInt(u32, hhmm[colon + 1 ..], 10) catch return null;
+        if (h > 23 or m > 59) return null;
+        return h * 60 + m;
+    }
+
+    /// Whether `sec` (seconds after local midnight) is inside the window.
+    fn contains(q: QuietHours, sec: i64) bool {
+        const m: u32 = @intCast(@divTrunc(sec, 60));
+        return if (q.start < q.end) m >= q.start and m < q.end else m >= q.start or m < q.end;
+    }
+
+    /// Seconds from `sec` (after local midnight) until the window next ends.
+    fn untilEnd(q: QuietHours, sec: i64) i64 {
+        const d = @as(i64, q.end) * 60 - sec;
+        return if (d > 0) d else d + 86400;
+    }
+
+    /// The end of the window as "HH:MM".
+    fn endHHMM(q: QuietHours) [5]u8 {
+        var out: [5]u8 = undefined;
+        _ = std.mem.print(&out, "{d:0>2}:{d:0>2}", .{ q.end / 60, q.end % 60 }) catch unreachable;
+        return out;
+    }
+};
+
+test QuietHours {
+    const q = QuietHours.parse("02:00-04:30").?;
+    try std.testing.expect(!q.contains(1 * 3600 + 59 * 60));
+    try std.testing.expect(q.contains(2 * 3600));
+    try std.testing.expect(q.contains(4 * 3600 + 29 * 60 + 59));
+    try std.testing.expect(!q.contains(4 * 3600 + 30 * 60));
+    try std.testing.expectEqual(@as(i64, 30 * 60), q.untilEnd(4 * 3600));
+    try std.testing.expectEqualStrings("04:30", &q.endHHMM());
+
+    const night = QuietHours.parse("23:00-05:00").?; // wraps past midnight
+    try std.testing.expect(night.contains(23 * 3600 + 30 * 60));
+    try std.testing.expect(night.contains(3 * 3600));
+    try std.testing.expect(!night.contains(12 * 3600));
+    try std.testing.expectEqual(@as(i64, 6 * 3600), night.untilEnd(23 * 3600));
+
+    try std.testing.expect(QuietHours.parse("2am-4am") == null);
+    try std.testing.expect(QuietHours.parse("02:00-02:00") == null);
+    try std.testing.expect(QuietHours.parse("25:00-04:00") == null);
 }
 
 // ------------------------------------------------------------------ input
@@ -203,6 +270,10 @@ const App = struct {
     weather: ?Weather = null,
     /// How long the last fetch waited for wifi, or -1 (saver off / failed).
     wifi_ms: i64 = -1,
+    /// Consecutive failed updates, for backing off while offline.
+    fail_streak: u32 = 0,
+    /// Local time zone (seconds from UTC), from the latest forecast.
+    utc_offset: ?i64 = null,
 
     fn hasMbta(app: *const App) bool {
         return app.board.n > 0;
@@ -212,9 +283,53 @@ const App = struct {
         return app.view == .mbta and app.hasMbta();
     }
 
-    /// Seconds between updates for the current view.
+    /// Seconds after local midnight, once a forecast has told us the zone.
+    fn localSecondOfDay(app: *const App) ?i64 {
+        const off = app.utc_offset orelse return null;
+        return @mod(sys.realtimeSec() + off, 86400);
+    }
+
+    /// Take the time zone from a freshly parsed forecast, before deciding
+    /// whether MBTA is live (quiet hours) in the same update.
+    fn noteZone(app: *App, w: anyerror!Weather) void {
+        const off = ((w catch return).utc_offset) orelse return;
+        app.utc_offset = off;
+        sys.utc_offset = off; // log timestamps in local time
+    }
+
+    fn inQuietHours(app: *const App) bool {
+        const q = app.cfg.quiet orelse return false;
+        return q.contains(app.localSecondOfDay() orelse return false);
+    }
+
+    /// Showing MBTA departures and fetching them (not in quiet hours).
+    fn mbtaLive(app: *const App) bool {
+        return app.showingMbta() and !app.inQuietHours();
+    }
+
+    /// Seconds between updates: the MBTA interval while departures are
+    /// live, otherwise the forecast interval.
     fn period(app: *const App) i64 {
-        return if (app.showingMbta()) app.cfg.mbta_interval else app.cfg.interval;
+        return if (app.mbtaLive()) app.cfg.mbta_interval else app.cfg.interval;
+    }
+
+    /// When the next update is due, for an update that began at `started`
+    /// (wall-clock seconds). Counting from the start keeps the time spent
+    /// waking and fetching from stretching every cycle.
+    fn nextDue(app: *const App, started: i64, ok: bool) i64 {
+        // After failures, back off (1, 2, 4 ... min, up to the period) so a
+        // dead network doesn't keep the radio busy every cycle.
+        const delay = if (ok) app.period() else @min(app.period(), @as(i64, 60) << @intCast(@min(app.fail_streak -| 1, 6)));
+        var due = started + delay;
+        // In quiet hours with the MBTA view up, wake just after they end
+        // (a few seconds' margin, since wake-ups can be a second early) so
+        // live departures come back on time.
+        if (app.showingMbta() and app.inQuietHours()) {
+            const end = sys.realtimeSec() + app.cfg.quiet.?.untilEnd(app.localSecondOfDay().?) + 5;
+            due = @min(due, end);
+        }
+        if (!ok) log("update failed {d} time(s) in a row; next try in {d}s", .{ app.fail_streak, due - started });
+        return due;
     }
 
     fn battery(app: *const App) ?kindle.Battery {
@@ -228,14 +343,16 @@ const App = struct {
         app.wifi_ms = -1;
         if (app.cfg.json) |path| {
             const w = try forecast.parse(try sys.readFile(path, &net_buf));
-            if (app.showingMbta()) app.board.refresh(&net_buf); // MBTA stays live
+            app.noteZone(w);
+            if (app.mbtaLive()) app.board.refresh(&net_buf); // MBTA stays live
             return w;
         }
         if (app.cfg.wifi_saver) kindle.setWifi(true);
         defer if (app.cfg.wifi_saver) kindle.setWifi(false);
         const result = app.fetchForecast();
+        app.noteZone(result);
         // `result` has been parsed out of net_buf, so the buffer is free again.
-        if (app.showingMbta()) app.board.refresh(&net_buf);
+        if (app.mbtaLive()) app.board.refresh(&net_buf);
         return result;
     }
 
@@ -269,6 +386,7 @@ const App = struct {
             .board = if (app.hasMbta()) &app.board else null,
             .view = app.view,
             .sleep = app.cfg.sleep,
+            .mbta_paused_until = if (app.showingMbta() and app.inQuietHours()) app.cfg.quiet.?.endHHMM() else null,
         });
     }
 
@@ -278,14 +396,15 @@ const App = struct {
         var result = app.fetch();
         if (result) |*w| {
             w.stampNow();
-            if (w.utc_offset) |off| sys.utc_offset = off; // log timestamps in local time
             app.weather = w.*;
+            app.fail_streak = 0;
             app.draw(w, .ok);
             const pct: i32 = if (app.battery()) |b| b.pct else -1;
             log("updated: {d:.1}° code {d}, battery {d}%", .{ w.temp, w.code, pct });
             app.logBattery("ok");
             return true;
         } else |err| {
+            app.fail_streak += 1;
             log("fetch failed: {s}", .{@errorName(err)});
             app.logBattery(@errorName(err));
             if (app.weather) |*w| app.draw(w, .{ .failed = @errorName(err) }) else {
@@ -311,12 +430,10 @@ const App = struct {
     /// Without --sleep: update, then wait for the period or a key.
     fn runAwake(app: *App) void {
         while (true) {
-            const started = sys.nowMs();
+            const started = sys.realtimeSec();
             const ok = app.update();
-            // After a failure with nothing to show, retry sooner. The period
-            // counts from the start of the update, as in runAsleep.
-            const period_ms = if (!ok and app.weather == null) 60_000 else app.period() * 1000;
-            switch (app.inputs.wait(period_ms - (sys.nowMs() - started))) {
+            const due = app.nextDue(started, ok);
+            switch (app.inputs.wait((due - sys.realtimeSec()) * 1000)) {
                 .quit => return,
                 .toggle => app.view = app.view.other(),
                 .refresh, .timeout => {},
@@ -328,7 +445,6 @@ const App = struct {
     /// (at start, or after the power switch woke us), then suspend the
     /// Kindle until the next update is due.
     fn runAsleep(app: *App) void {
-        kindle.logRtcInfo();
         var due: i64 = 0; // wall-clock time the next update is due
         var user_awake = true; // just started: offer the key window
         // M was pressed: presses during that refresh are impatient repeats,
@@ -337,13 +453,11 @@ const App = struct {
 
         while (true) {
             if (sys.realtimeSec() >= due - 30) { // close enough: update now rather than sleep again
-                // Count the period from the start of the update, so the time
-                // spent reconnecting and fetching doesn't add to every cycle.
                 const started = sys.realtimeSec();
                 const ok = app.update();
                 if (drain_after_update) app.inputs.drain("pressed while switching views");
                 drain_after_update = false;
-                due = started + if (ok) app.period() else @min(app.period(), 300);
+                due = app.nextDue(started, ok);
             }
 
             if (user_awake) {
@@ -435,4 +549,5 @@ test {
     _ = ui;
     _ = mbta;
     _ = display;
+    _ = forecast;
 }

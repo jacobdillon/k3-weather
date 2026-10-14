@@ -33,6 +33,8 @@ pub const Screen = struct {
     view: View = .days,
     /// The Kindle sleeps between updates, so keys need the power switch first.
     sleep: bool = false,
+    /// In quiet hours: the local "HH:MM" when MBTA updates resume.
+    mbta_paused_until: ?[5]u8 = null,
 };
 
 const M = 28; // side margin
@@ -105,7 +107,7 @@ pub fn render(canvas: *cv.Canvas, s: Screen) void {
 
     // Bottom half: the next two days, or MBTA departures.
     if (s.board) |board| {
-        if (s.view == .mbta) renderMbta(canvas, board) else renderDays(canvas, w);
+        if (s.view == .mbta) renderMbta(canvas, board, s.mbta_paused_until) else renderDays(canvas, w);
         const target = if (s.view == .mbta) "forecast" else "MBTA";
         const hint = if (s.sleep)
             std.mem.print(&b3, "Slide the power switch, then press M for {s}", .{target}) catch ""
@@ -156,13 +158,16 @@ fn renderDays(canvas: *cv.Canvas, w: *const Weather) void {
     }
 }
 
-/// Up to three rows: a label, then the next departure times.
-fn renderMbta(canvas: *cv.Canvas, board: *const mbta.Board) void {
+/// Up to three rows: a label, then the next departure times (or, in quiet
+/// hours, when updates resume).
+fn renderMbta(canvas: *cv.Canvas, board: *const mbta.Board, paused_until: ?[5]u8) void {
     const row_h = 90;
 
-    // "updated 3:29 PM" at the top right of the section, beside the first label.
+    // "updated 3:29 PM" at the top right of the section, beside the first
+    // label. Not in quiet hours, where the old departures aren't shown.
     var stamp_w: i32 = 0;
-    if (board.updated) |*hhmm| {
+    const stamp = if (paused_until == null) board.updated else null;
+    if (stamp) |*hhmm| {
         var tb: [16]u8 = undefined;
         var sb: [32]u8 = undefined;
         const s = std.mem.print(&sb, "updated {s}", .{timeStr(&tb, hhmm)}) catch "";
@@ -175,7 +180,12 @@ fn renderMbta(canvas: *cv.Canvas, board: *const mbta.Board) void {
         if (i > 0) canvas.hline(M, cv.W - M, y0 - 4, 1, cv.gray);
         const label_w = cv.W - 2 * M - if (i == 0) stamp_w else 0;
         cv.text(canvas, .bold, cv.fitSize(.bold, 24, label_w, line.label), M, y0 + 28, .left, cv.black, line.label);
-        if (dep.err) |e| {
+        if (paused_until) |*hhmm| {
+            var tb: [16]u8 = undefined;
+            var pb: [48]u8 = undefined;
+            const s = std.mem.print(&pb, "Quiet hours: back at {s}", .{timeStr(&tb, hhmm)}) catch "Quiet hours";
+            cv.text(canvas, .regular, 26, M, y0 + 74, .left, cv.dark_gray, s);
+        } else if (dep.err) |e| {
             var eb: [64]u8 = undefined;
             const s = std.mem.print(&eb, "Unavailable ({s})", .{e}) catch "Unavailable";
             cv.text(canvas, .regular, 26, M, y0 + 74, .left, cv.dark_gray, s);

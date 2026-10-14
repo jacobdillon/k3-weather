@@ -66,12 +66,27 @@ pub fn logBattery(path: [:0]const u8, bat: ?Battery, fetch_result: []const u8, w
         fetch_result,         wifi_ms,
     }) catch return;
 
-    const exists = c.access(path, 0) == 0;
-    const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(c.mode_t, 0o644));
-    if (fd < 0) return;
+    var fd = openAppend(path) orelse return;
+    // Keep one previous file once this one passes the limit, like weather.log.
+    if (c.lseek(fd, 0, c.SEEK.END) > battery_log_max) {
+        _ = c.close(fd);
+        var ob: [512]u8 = undefined;
+        const old = std.mem.printSentinel(&ob, "{s}.old", .{path}, 0) catch return;
+        _ = c.rename(path, old);
+        fd = openAppend(path) orelse return;
+    }
     defer _ = c.close(fd);
-    if (!exists) _ = c.write(fd, battery_log_header, battery_log_header.len);
+    if (c.lseek(fd, 0, c.SEEK.END) == 0) _ = c.write(fd, battery_log_header, battery_log_header.len);
     _ = c.write(fd, row.ptr, row.len);
+}
+
+/// About a month of 5-minute rows (~60 bytes each), so the current file plus
+/// battery.csv.old cover the last one to two months.
+const battery_log_max = 512 * 1024;
+
+fn openAppend(path: [:0]const u8) ?c.fd_t {
+    const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(c.mode_t, 0o644));
+    return if (fd < 0) null else fd;
 }
 
 // ------------------------------------------------------------------- wifi
@@ -99,11 +114,8 @@ const wakeup_enable = "/sys/devices/platform/mxc_rtc.0/wakeup_enable";
 /// power switch), or an error if the kernel refused to suspend.
 pub fn suspendFor(seconds: i64) !void {
     var buf: [24]u8 = undefined;
-    var vb: [32]u8 = undefined;
-    const before = std.mem.trim(u8, sys.readFile(wakeup_enable, &vb) catch "?", " \r\n");
     try writeSysfs(wakeup_enable, try std.mem.print(&buf, "{d}", .{seconds}));
-    const after = std.mem.trim(u8, sys.readFile(wakeup_enable, &vb) catch "?", " \r\n");
-    sys.log("suspending for {d}s (wakeup_enable {s} -> {s})", .{ seconds, before, after });
+    sys.log("suspending for {d}s", .{seconds});
     try writeSysfs("/sys/power/state", "mem");
 }
 
@@ -145,15 +157,4 @@ pub fn logWakeInfo() WakeSource {
     if (std.mem.eql(u8, source, "unknown")) return .unknown;
     if (std.mem.find(u8, source, "Power") != null) return .power_button;
     return .other;
-}
-
-/// Log the Lab126 RTC sysfs attributes, e.g. mxc_rtc.0/wakeup_enable, which
-/// kindle-dash uses on the Kindle 4 to arm a wake-up without powerd.
-pub fn logRtcInfo() void {
-    var buf: [1024]u8 = undefined;
-    const out = sys.output("for d in /sys/devices/platform/mxc_rtc.0 /sys/devices/platform/pmic_rtc.1; do " ++
-        "echo \"$d: $(ls $d 2>&1 | tr '\\n' ' ')\"; done; " ++
-        "for f in /sys/devices/platform/*rtc*/wakeup_enable; do [ -f $f ] && echo \"$f = $(cat $f)\"; done", &buf) orelse return;
-    var lines = std.mem.tokenizeScalar(u8, out, '\n');
-    while (lines.next()) |line| sys.log("rtc: {s}", .{line});
 }

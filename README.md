@@ -15,7 +15,7 @@ A full-screen weather and transit display for a jailbroken Kindle 3 (Keyboard), 
   - Numbers are the average of the models that returned data.
   - Weather conditions go to a plurality vote; on a three-way tie, GFS wins.
   - Open-Meteo has no server-side cross-model average; its default `best_match` picks a single model per location.
-- **Refreshes** every 30 minutes, or every 5 minutes while the MBTA view is showing. Each refresh is a full e-ink refresh, which clears ghosting.
+- **Refreshes** every 30 minutes, or every 5 minutes while the MBTA view is showing, except during configurable overnight quiet hours. Each refresh is a full e-ink refresh, which clears ghosting.
 - **Battery:** a battery indicator under the header turns bold with "charge me" at 20% or below. `battery.csv` logs the level at every refresh.
 - **Power saving:** by default the Kindle is suspended between refreshes and woken by its RTC alarm, and wifi is only on while fetching.
 - **No API keys.** Open-Meteo is fetched over plain HTTP, so the Kindle's outdated TLS stack doesn't matter. MBTA is fetched over HTTPS with Zig's own TLS client.
@@ -70,7 +70,7 @@ While the display runs, the launcher:
 
 Both are undone when the app exits, and wifi is switched back on.
 
-If a fetch fails, the last good data stays on screen, with `OFFLINE (reason)` in the status line. If no data has loaded yet, the app retries every minute.
+If a fetch fails, the last good data stays on screen, with `OFFLINE (reason)` in the status line. The app then backs off: it retries after 1 minute, then 2, 4, 8 and so on, up to the normal refresh interval. That stops a dead network from keeping the wifi radio busy every cycle.
 
 ## Configuration
 
@@ -86,6 +86,7 @@ Everything lives in `extensions/weather/weather.conf`:
 | `MBTA1`…`MBTA3` | two Red Line rows | MBTA rows; see [MBTA departures](#mbta-departures) |
 | `MBTA_INTERVAL` | `300` | seconds between refreshes in the MBTA view |
 | `VIEW` | `mbta` | bottom half at start: `mbta` or `days` |
+| `QUIET_HOURS` | `02:00-04:30` | local time window with no MBTA updates (see [MBTA departures](#mbta-departures)); empty = off |
 | `EXTRA_ARGS` | | extra command-line options, e.g. `--no-invert` |
 
 With `WIFI_SAVER=1`, the app turns wifi on before each fetch with `lipc-set-prop com.lab126.wifid enable 1`. It retries for up to 60 seconds while the network comes up, which usually takes 8–15 s, then switches wifi off again.
@@ -123,17 +124,24 @@ MBTA2="place-cntsq Red 0 Red to Ashmont/Braintree @ Central"
 
 Departures are shown as clock times, which stay correct even when the screen is a few minutes old. "updated …" at the top right of the section says when they were fetched.
 
+**Quiet hours** (`QUIET_HOURS="02:00-04:30"` by default) cover the hours when the T isn't running:
+
+- During the window, the app fetches no departures, and the MBTA view refreshes on the forecast's 30-minute `INTERVAL` instead of every 5 minutes.
+- Each row reads "Quiet hours: back at 4:30 AM" instead of showing stale times.
+- The app wakes just after the window ends, so live departures are back on time.
+- Windows that cross midnight (e.g. `23:00-05:00`) work too.
+
 Some technical details:
 
 - **HTTPS.** MBTA's API is HTTPS-only. The app runs Zig's TLS client (`std.crypto.tls`) on its own libc socket code. It verifies certificates against Amazon's root certificates plus the Starfield root that cross-signs them, all embedded in `assets/mbta-roots.pem`; the Kindle's own certificate store is years out of date. If MBTA changes certificate authority, update that file.
-- **No API key.** Without a key, MBTA allows 20 requests a minute. The app makes one per row per refresh, plus a one-time stop lookup per row.
+- **No API key.** Without a key, MBTA allows 20 requests a minute. The app makes one request per stop and route per refresh, so the two Red Line rows at Central share one request. It also looks up each stop once.
 - **Unknown stop IDs.** The predictions endpoint silently ignores an unknown stop and returns departures from other stops on the route. So the app looks up each stop once, and a typo shows up as `Unavailable (UnknownStop)` instead of wrong times.
 
 ## Troubleshooting
 
 The log is `extensions/weather/weather.log`.
 
-- **What's in it:** every line has a timestamp, and each start adds a `=== … start (SLEEP=… …)` marker. The log carries on across runs, and moves to `weather.log.old` once it passes 200 KB. Fetches (with wifi connection times), MBTA requests, key presses (with key codes) and sleep/wake events are all logged.
+- **What's in it:** every line has a timestamp, and each start adds a `=== … start (SLEEP=… …)` marker. The log carries on across runs, and moves to `weather.log.old` once it passes 200 KB. `battery.csv` works the same way, rotating to `battery.csv.old` at 512 KB, which is about a month of 5-minute rows. Fetches (with wifi connection times), MBTA requests, key presses (with key codes) and sleep/wake events are all logged.
 - **The screen looks like a photo negative:** set `EXTRA_ARGS="--no-invert"`. The Kindle 3's 4-bit framebuffer stores white as 0, and the app assumes that by default.
 - **The image is drawn but the screen never changes:** the app tries the `FBIO_EINK_UPDATE_DISPLAY` ioctl first, then `/proc/eink_fb/update_display`. Check the log for errors.
 - **Home doesn't exit:** look up the key code in the log, and add it to the `.quit` case in `Inputs.wait` in `src/main.zig`.
